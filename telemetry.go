@@ -33,9 +33,27 @@ const (
 	ExporterNone Exporter = "none"
 )
 
+type Option func(*config)
+
+type config struct {
+	detectors []resource.Detector
+}
+
+// WithDetectors adds resource detectors that run after the build-in ones.
+func WithDetectors(d ...resource.Detector) Option {
+	return func(c *config) {
+		c.detectors = append(c.detectors, d...)
+	}
+}
+
 // Setup installs global providers and starts runtime metrics. The service name and other resource
 // attributes come from OTEL_SERVICE_NAME and OTEL_RESOURCE_ATTRIBUTES. Call the returned function on shutdown.
-func Setup(ctx context.Context, exporter Exporter) (shutdown func(context.Context) error, err error) {
+func Setup(ctx context.Context, exporter Exporter, opts ...Option) (shutdown func(context.Context) error, err error) {
+	var cfg config
+	for _, o := range opts {
+		o(&cfg)
+	}
+
 	var shutdownFuncs []func(context.Context) error
 	shutdown = func(ctx context.Context) error {
 		var err error
@@ -51,7 +69,24 @@ func Setup(ctx context.Context, exporter Exporter) (shutdown func(context.Contex
 		}
 	}()
 
-	res, err := resource.New(ctx, resource.WithFromEnv(), resource.WithTelemetrySDK())
+	// Later options override earlier ones, so environment-provided attributes come last.
+	res, err := resource.New(ctx,
+		resource.WithTelemetrySDK(),
+		resource.WithService(),
+		resource.WithHost(),
+		resource.WithHostID(),
+		resource.WithOS(),
+		resource.WithProcess(),
+		resource.WithContainer(),
+		resource.WithDetectors(cfg.detectors...),
+		resource.WithFromEnv(),
+	)
+
+	// Some detectors (host ID, process owner, container ID) can't always find their source; keep
+	// whatever was detected rather than failing setup.
+	if errors.Is(err, resource.ErrPartialResource) || errors.Is(err, resource.ErrSchemaURLConflict) {
+		err = nil
+	}
 	if err != nil {
 		return shutdown, fmt.Errorf("telemetry resource: %w", err)
 	}
