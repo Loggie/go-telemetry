@@ -82,13 +82,13 @@ func Setup(ctx context.Context, exporter Exporter, opts ...Option) (shutdown fun
 		resource.WithFromEnv(),
 	)
 
-	// Some detectors (host ID, process owner, container ID) can't always find their source; keep
-	// whatever was detected rather than failing setup.
-	if errors.Is(err, resource.ErrPartialResource) || errors.Is(err, resource.ErrSchemaURLConflict) {
-		err = nil
-	}
+	// Some detectors (host ID, process owner, container ID) can't always find their source, e.g. a
+	// distroless image has no /etc/machine-id. Keep whatever was detected rather than failing setup.
 	if err != nil {
-		return shutdown, fmt.Errorf("telemetry resource: %w", err)
+		if res == nil {
+			return shutdown, fmt.Errorf("telemetry resource: %w", err)
+		}
+		otel.Handle(fmt.Errorf("telemetry resource (partial): %w", err))
 	}
 
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
