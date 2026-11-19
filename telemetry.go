@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
+	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
@@ -37,6 +39,7 @@ type Option func(*config)
 
 type config struct {
 	detectors []resource.Detector
+	logScope  string
 }
 
 // WithDetectors adds resource detectors that run after the build-in ones.
@@ -46,28 +49,77 @@ func WithDetectors(d ...resource.Detector) Option {
 	}
 }
 
+// WithLogScope sets the instrumentation scope name on records from the default slog logger,
+// typically the application's module path. If unset, the scope name is empty.
+func WithLogScope(name string) Option {
+	return func(c *config) {
+		c.logScope = name
+	}
+}
+
 // Setup installs global providers and starts runtime metrics. The service name and other resource
 // attributes come from OTEL_SERVICE_NAME and OTEL_RESOURCE_ATTRIBUTES. Call the returned function on shutdown.
-func Setup(ctx context.Context, exporter Exporter, opts ...Option) (shutdown func(context.Context) error, err error) {
+//
+// Unless exporter is ExporterNone, Setup also makes slog's default logger write to the OTel logger provider
+// instead of stderr. Log with a context ([slog.LogAttrs], [slog.InfoContext], ...) so records are linked to the span.
+func Setup(ctx context.Context, exporter Exporter, opts ...Option) (func(context.Context) error, error) {
+	p, err := newProviders(ctx, exporter, opts...)
+	if err != nil {
+		return p.shutdown, err
+	}
+
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	))
+	otel.SetTracerProvider(p.tracer)
+	otel.SetMeterProvider(p.meter)
+	otel.SetLoggerProvider(p.logger)
+	if p.slog != nil {
+		slog.SetDefault(p.slog)
+	}
+
+	if err = runtime.Start(runtime.WithMeterProvider(p.meter)); err != nil {
+		return p.shutdown, errors.Join(err, p.shutdown(ctx))
+	}
+
+	return p.shutdown, nil
+}
+
+// providers holds everything Setup installs globally, so it can be built and tested without
+// touching process-wide state.
+type providers struct {
+	tracer *trace.TracerProvider
+	meter  *metric.MeterProvider
+	logger *log.LoggerProvider
+	// slog is the logger bridged to the OTel logger provider; nil for ExporterNone.
+	slog          *slog.Logger
+	shutdownFuncs []func(context.Context) error
+}
+
+// shutdown stops every provider built so far. It is safe to call more than once.
+func (p *providers) shutdown(ctx context.Context) error {
+	var errs error
+	for _, fn := range p.shutdownFuncs {
+		errs = errors.Join(errs, fn(ctx))
+	}
+	p.shutdownFuncs = nil
+	return errs
+}
+
+// fail shuts down what was built so far and returns err joined with any shutdown error.
+func (p *providers) fail(ctx context.Context, err error) (*providers, error) {
+	return p, errors.Join(err, p.shutdown(ctx))
+}
+
+// newProviders builds the trace, metric and log providers and the bridged slog logger. On error, the
+// returned providers are already shut down and still safe to use for shutdown.
+func newProviders(ctx context.Context, exporter Exporter, opts ...Option) (*providers, error) {
 	var cfg config
 	for _, o := range opts {
 		o(&cfg)
 	}
-
-	var shutdownFuncs []func(context.Context) error
-	shutdown = func(ctx context.Context) error {
-		var err error
-		for _, fn := range shutdownFuncs {
-			err = errors.Join(err, fn(ctx))
-		}
-		shutdownFuncs = nil
-		return err
-	}
-	defer func() {
-		if err != nil {
-			err = errors.Join(err, shutdown(ctx))
-		}
-	}()
+	p := &providers{}
 
 	// Later options override earlier ones, so environment-provided attributes come last.
 	res, err := resource.New(ctx,
@@ -81,47 +133,38 @@ func Setup(ctx context.Context, exporter Exporter, opts ...Option) (shutdown fun
 		resource.WithDetectors(cfg.detectors...),
 		resource.WithFromEnv(),
 	)
-
 	// Some detectors (host ID, process owner, container ID) can't always find their source, e.g. a
 	// distroless image has no /etc/machine-id. Keep whatever was detected rather than failing setup.
 	if err != nil {
 		if res == nil {
-			return shutdown, fmt.Errorf("telemetry resource: %w", err)
+			return p, fmt.Errorf("telemetry resource: %w", err)
 		}
 		otel.Handle(fmt.Errorf("telemetry resource (partial): %w", err))
 	}
 
-	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
-		propagation.TraceContext{},
-		propagation.Baggage{},
-	))
-
-	tracerProvider, err := newTracerProvider(ctx, exporter, res)
+	p.tracer, err = newTracerProvider(ctx, exporter, res)
 	if err != nil {
-		return shutdown, err
+		return p.fail(ctx, err)
 	}
-	shutdownFuncs = append(shutdownFuncs, tracerProvider.Shutdown)
-	otel.SetTracerProvider(tracerProvider)
+	p.shutdownFuncs = append(p.shutdownFuncs, p.tracer.Shutdown)
 
-	meterProvider, err := newMeterProvider(ctx, exporter, res)
+	p.meter, err = newMeterProvider(ctx, exporter, res)
 	if err != nil {
-		return shutdown, err
+		return p.fail(ctx, err)
 	}
-	shutdownFuncs = append(shutdownFuncs, meterProvider.Shutdown)
-	otel.SetMeterProvider(meterProvider)
+	p.shutdownFuncs = append(p.shutdownFuncs, p.meter.Shutdown)
 
-	loggerProvider, err := newLoggerProvider(ctx, exporter, res)
+	p.logger, err = newLoggerProvider(ctx, exporter, res)
 	if err != nil {
-		return shutdown, err
+		return p.fail(ctx, err)
 	}
-	shutdownFuncs = append(shutdownFuncs, loggerProvider.Shutdown)
-	otel.SetLoggerProvider(loggerProvider)
+	p.shutdownFuncs = append(p.shutdownFuncs, p.logger.Shutdown)
 
-	if err = runtime.Start(runtime.WithMeterProvider(meterProvider)); err != nil {
-		return shutdown, err
+	if exporter != ExporterNone {
+		p.slog = slog.New(otelslog.NewHandler(cfg.logScope, otelslog.WithLoggerProvider(p.logger)))
 	}
 
-	return shutdown, nil
+	return p, nil
 }
 
 func newTracerProvider(ctx context.Context, exporter Exporter, res *resource.Resource) (*trace.TracerProvider, error) {
