@@ -1,8 +1,9 @@
 module github.com/loggie/go-telemetry
 
-go 1.27.3
+go 1.27.4
 
 require (
+	go.opentelemetry.io/contrib/bridges/otelslog v0.21.0
 	go.opentelemetry.io/contrib/instrumentation/runtime v0.72.0
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc v0.23.0
