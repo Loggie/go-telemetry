@@ -1,6 +1,6 @@
 module github.com/loggie/go-telemetry
 
-go 1.27.3
+go 1.27.4
 
 require (
 	go.opentelemetry.io/contrib/bridges/otelslog v0.21.0
