@@ -3,13 +3,15 @@
 Configures global OpenTelemetry trace, metric and log providers, plus runtime metrics.
 
 ```go
-shutdown, err := telemetry.Setup(ctx, telemetry.ExporterOTLP, // or ExporterStdout, ExporterNone
+shutdown, err := telemetry.Setup(ctx,
+    telemetry.WithExporter(telemetry.ExporterOTLP), // or ExporterStdout; default ExporterNone
     telemetry.WithLoggerName("github.com/your/app"),
 )
 defer shutdown(context.Background())
 ```
 
-The OTLP endpoint comes from the standard `OTEL_EXPORTER_OTLP_*` variables.
+The OTLP endpoint comes from the standard `OTEL_EXPORTER_OTLP_*` variables. `Setup` returns an error for an
+unknown exporter, or when the exporter is `otlp` or `stdout` and `WithLoggerName` is missing or empty.
 
 ## Logs
 
@@ -66,7 +68,9 @@ Pass extra detectors to `Setup` with `WithDetectors`. They run after the built-i
 override generic `host.*` values) but before `WithFromEnv` (so the environment still wins):
 
 ```go
-shutdown, err := telemetry.Setup(ctx, telemetry.ExporterOTLP,
+shutdown, err := telemetry.Setup(ctx,
+    telemetry.WithExporter(telemetry.ExporterOTLP),
+    telemetry.WithLoggerName("github.com/your/app"),
     telemetry.WithDetectors(gcp.NewDetector()),
 )
 ```

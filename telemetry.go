@@ -38,8 +38,16 @@ const (
 type Option func(*config)
 
 type config struct {
+	exporter   Exporter
 	detectors  []resource.Detector
 	loggerName string
+}
+
+// WithExporter selects where telemetry is sent. The default is ExporterNone.
+func WithExporter(e Exporter) Option {
+	return func(c *config) {
+		c.exporter = e
+	}
 }
 
 // WithDetectors adds resource detectors that run after the build-in ones.
@@ -50,8 +58,8 @@ func WithDetectors(d ...resource.Detector) Option {
 }
 
 // WithLoggerName sets the name of the OTel logger behind slog's default logger, recorded as the
-// instrumentation scope name on its records. It is typically the application's module path. If unset,
-// the name is empty.
+// instrumentation scope name on its records. It is typically the application's module path. It is required
+// unless the exporter is ExporterNone.
 func WithLoggerName(name string) Option {
 	return func(c *config) {
 		c.loggerName = name
@@ -61,10 +69,10 @@ func WithLoggerName(name string) Option {
 // Setup installs global providers and starts runtime metrics. The service name and other resource
 // attributes come from OTEL_SERVICE_NAME and OTEL_RESOURCE_ATTRIBUTES. Call the returned function on shutdown.
 //
-// Unless exporter is ExporterNone, Setup also makes slog's default logger write to the OTel logger provider
+// Unless the exporter is ExporterNone, Setup also makes slog's default logger write to the OTel logger provider
 // instead of stderr. Log with a context ([slog.LogAttrs], [slog.InfoContext], ...) so records are linked to the span.
-func Setup(ctx context.Context, exporter Exporter, opts ...Option) (shutdown func(context.Context) error, err error) {
-	var cfg config
+func Setup(ctx context.Context, opts ...Option) (shutdown func(context.Context) error, err error) {
+	cfg := config{exporter: ExporterNone}
 	for _, o := range opts {
 		o(&cfg)
 	}
@@ -83,6 +91,16 @@ func Setup(ctx context.Context, exporter Exporter, opts ...Option) (shutdown fun
 			err = errors.Join(err, shutdown(ctx))
 		}
 	}()
+
+	switch cfg.exporter {
+	case ExporterOTLP, ExporterStdout:
+		if cfg.loggerName == "" {
+			return shutdown, fmt.Errorf("telemetry: logger name is required with exporter %q", cfg.exporter)
+		}
+	case ExporterNone:
+	default:
+		return shutdown, fmt.Errorf("unknown telemetry exporter %q", cfg.exporter)
+	}
 
 	// Later options override earlier ones, so environment-provided attributes come last.
 	res, err := resource.New(ctx,
@@ -111,27 +129,27 @@ func Setup(ctx context.Context, exporter Exporter, opts ...Option) (shutdown fun
 		propagation.Baggage{},
 	))
 
-	tracerProvider, err := newTracerProvider(ctx, exporter, res)
+	tracerProvider, err := newTracerProvider(ctx, cfg.exporter, res)
 	if err != nil {
 		return shutdown, err
 	}
 	shutdownFuncs = append(shutdownFuncs, tracerProvider.Shutdown)
 	otel.SetTracerProvider(tracerProvider)
 
-	meterProvider, err := newMeterProvider(ctx, exporter, res)
+	meterProvider, err := newMeterProvider(ctx, cfg.exporter, res)
 	if err != nil {
 		return shutdown, err
 	}
 	shutdownFuncs = append(shutdownFuncs, meterProvider.Shutdown)
 	otel.SetMeterProvider(meterProvider)
 
-	loggerProvider, err := newLoggerProvider(ctx, exporter, res)
+	loggerProvider, err := newLoggerProvider(ctx, cfg.exporter, res)
 	if err != nil {
 		return shutdown, err
 	}
 	shutdownFuncs = append(shutdownFuncs, loggerProvider.Shutdown)
 	otel.SetLoggerProvider(loggerProvider)
-	if exporter != ExporterNone {
+	if cfg.exporter != ExporterNone {
 		slog.SetDefault(slog.New(otelslog.NewHandler(cfg.loggerName, otelslog.WithLoggerProvider(loggerProvider))))
 	}
 
