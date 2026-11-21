@@ -3,7 +3,9 @@
 Configures global OpenTelemetry trace, metric and log providers, plus runtime metrics.
 
 ```go
-shutdown, err := telemetry.Setup(ctx, telemetry.ExporterOTLP) // or ExporterStdout, ExporterNone
+shutdown, err := telemetry.Setup(ctx, telemetry.ExporterOTLP, // or ExporterStdout, ExporterNone
+    telemetry.WithLoggerName("github.com/your/app"),
+)
 defer shutdown(context.Background())
 ```
 
@@ -12,8 +14,8 @@ The OTLP endpoint comes from the standard `OTEL_EXPORTER_OTLP_*` variables.
 ## Logs
 
 Unless the exporter is `ExporterNone`, `Setup` makes `slog`'s default logger write to the OTel logger provider
-(through `otelslog`) instead of stderr. Log with a context so each record carries the current span's trace and span
-ids:
+(through `otelslog`, with the `WithLoggerName` name as the instrumentation scope) instead of stderr. Log with a
+context so each record carries the current span's trace and span ids:
 
 ```go
 slog.LogAttrs(ctx, slog.LevelWarn, "retrying", slog.Int("attempt", n), slog.Any("error", err))
