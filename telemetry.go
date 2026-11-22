@@ -150,7 +150,10 @@ func Setup(ctx context.Context, opts ...Option) (shutdown func(context.Context) 
 	shutdownFuncs = append(shutdownFuncs, loggerProvider.Shutdown)
 	otel.SetLoggerProvider(loggerProvider)
 	if cfg.exporter != ExporterNone {
-		slog.SetDefault(slog.New(otelslog.NewHandler(cfg.loggerName, otelslog.WithLoggerProvider(loggerProvider))))
+		slog.SetDefault(slog.New(otelslog.NewHandler(cfg.loggerName,
+			otelslog.WithLoggerProvider(loggerProvider),
+			otelslog.WithSource(true),
+		)))
 	}
 
 	if err = runtime.Start(runtime.WithMeterProvider(meterProvider)); err != nil {
