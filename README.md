@@ -6,7 +6,8 @@ Configures global OpenTelemetry trace, metric and log providers, plus optional r
 shutdown, err := telemetry.Setup(ctx,
     telemetry.WithExporter(telemetry.ExporterOTLP), // or ExporterStdout; default ExporterNone
     telemetry.WithLoggerName("github.com/your/app"),
-    telemetry.WithRuntimeMetrics(),
+    telemetry.WithRuntimeMetrics(), // optional: go.* runtime metrics
+    telemetry.WithHostMetrics(),    // optional: system.* / process.* metrics
 )
 defer shutdown(context.Background())
 ```
