@@ -1,17 +1,30 @@
 # go-telemetry
 
-Configures global OpenTelemetry trace, metric and log providers, plus runtime metrics.
+Configures global OpenTelemetry trace, metric and log providers, plus optional runtime and host metrics.
 
 ```go
 shutdown, err := telemetry.Setup(ctx,
     telemetry.WithExporter(telemetry.ExporterOTLP), // or ExporterStdout; default ExporterNone
     telemetry.WithLoggerName("github.com/your/app"),
+    telemetry.WithRuntimeMetrics(),
 )
 defer shutdown(context.Background())
 ```
 
 The OTLP endpoint comes from the standard `OTEL_EXPORTER_OTLP_*` variables. `Setup` returns an error for an
 unknown exporter, or when the exporter is `otlp` or `stdout` and `WithLoggerName` is missing or empty.
+
+## Runtime metrics
+
+`WithRuntimeMetrics()` starts `go.opentelemetry.io/contrib/instrumentation/runtime` (`go.memory.*`,
+`go.goroutine.count`, `go.processor.limit`, `go.config.gogc`, ...).
+
+## Host metrics
+
+`WithHostMetrics()` also starts `go.opentelemetry.io/contrib/instrumentation/host`: `process.cpu.time`,
+`system.cpu.time`, `system.memory.usage`, `system.memory.utilization` and `system.network.io` (with
+`network.io.direction`). The `system.*` metrics cover the whole system so on
+Cloud Run or Pod they include sidecars.
 
 ## Logs
 
