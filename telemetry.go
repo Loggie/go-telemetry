@@ -8,6 +8,7 @@ import (
 	"log/slog"
 
 	"go.opentelemetry.io/contrib/bridges/otelslog"
+	"go.opentelemetry.io/contrib/instrumentation/host"
 	"go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
@@ -38,9 +39,11 @@ const (
 type Option func(*config)
 
 type config struct {
-	exporter   Exporter
-	detectors  []resource.Detector
-	loggerName string
+	exporter       Exporter
+	detectors      []resource.Detector
+	loggerName     string
+	runtimeMetrics bool
+	hostMetrics    bool
 }
 
 // WithExporter selects where telemetry is sent. The default is ExporterNone.
@@ -66,7 +69,22 @@ func WithLoggerName(name string) Option {
 	}
 }
 
-// Setup installs global providers and starts runtime metrics. The service name and other resource
+// WithRuntimeMetrics starts Go runtime metrics (go.memory.*, go.goroutine.count, go.processor.limit, ...).
+func WithRuntimeMetrics() Option {
+	return func(c *config) {
+		c.runtimeMetrics = true
+	}
+}
+
+// WithHostMetrics starts host and process metrics (system.cpu.*, system.memory.*, system.network.io,
+// process.cpu.time).
+func WithHostMetrics() Option {
+	return func(c *config) {
+		c.hostMetrics = true
+	}
+}
+
+// Setup installs global providers, plus runtime and host metrics when enabled. The service name and other resource
 // attributes come from OTEL_SERVICE_NAME and OTEL_RESOURCE_ATTRIBUTES. Call the returned function on shutdown.
 //
 // Unless the exporter is ExporterNone, Setup also makes slog's default logger write to the OTel logger provider
@@ -114,7 +132,6 @@ func Setup(ctx context.Context, opts ...Option) (shutdown func(context.Context) 
 		resource.WithDetectors(cfg.detectors...),
 		resource.WithFromEnv(),
 	)
-
 	// Some detectors (host ID, process owner, container ID) can't always find their source, e.g. a
 	// distroless image has no /etc/machine-id. Keep whatever was detected rather than failing setup.
 	if err != nil {
@@ -156,11 +173,26 @@ func Setup(ctx context.Context, opts ...Option) (shutdown func(context.Context) 
 		)))
 	}
 
-	if err = runtime.Start(runtime.WithMeterProvider(meterProvider)); err != nil {
+	if err = startMetrics(cfg, meterProvider); err != nil {
 		return shutdown, err
 	}
 
 	return shutdown, nil
+}
+
+// startMetrics starts the runtime and host instrumentation enabled in cfg.
+func startMetrics(cfg config, mp *metric.MeterProvider) error {
+	if cfg.runtimeMetrics {
+		if err := runtime.Start(runtime.WithMeterProvider(mp)); err != nil {
+			return fmt.Errorf("runtime metrics: %w", err)
+		}
+	}
+	if cfg.hostMetrics {
+		if err := host.Start(host.WithMeterProvider(mp)); err != nil {
+			return fmt.Errorf("host metrics: %w", err)
+		}
+	}
+	return nil
 }
 
 func newTracerProvider(ctx context.Context, exporter Exporter, res *resource.Resource) (*trace.TracerProvider, error) {
